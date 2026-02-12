@@ -21,6 +21,7 @@
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 4
 #define KILO_QUIT_TIMES 3
+#define NUM_PADDING 6
 
 #define CTRL_KEY(k) ((k) & 0x1f) //bitmask the strips input to it's control key component (removes bits 6-8), so that we can map then check and map them to different behaviours.
 
@@ -75,7 +76,7 @@ typedef struct erow {
 
 struct editorConfig {
     int cx,cy; //indexes of row, and chars buffer
-    int rx; //position in the rendered buffer (we need this because tabs are only unpacked in the rendered buffer)
+    int rx,ry; //position in the rendered buffer (we need this because tabs are only unpacked in the rendered buffer)
     int rowoff;
     int coloff;
     int screenrows;
@@ -96,21 +97,12 @@ struct editorConfig E;
 
 char *C_HL_extensions[] = {".c",".h",".cpp",NULL}; //Arrays must terminate with null
 char *C_HL_keywords[] = {
-  "switch", "if", "while", "for", "break", "continue", "return", "else",
-  "struct", "union", "typedef", "static", "enum", "class", "case",
-
-  "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-  "void|", NULL
+  "switch", "if", "while", "for", "break", "continue", "return", "else", "struct", "union", "typedef", "static", "enum", "class", "case",
+  "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|", "void|", NULL
 }; //| to denote secondary keywords
 
 struct editorSyntax HLDB[] = { //Array of editorSyntax structs
-    { //editorSyntax struct for .c
-        "c",
-        C_HL_extensions,
-        C_HL_keywords,
-        "//", "/*", "*/",
-        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
-    },
+    { "c", C_HL_extensions, C_HL_keywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS }, //struct for .c
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
@@ -509,7 +501,7 @@ void editorRowInsertChar(erow *row, int at, int c)  {
 
     if (at < 0 || at > row->size) at = row->size; //can't insert without the limits of the string + 1
 
-    row->chars = realloc(row->chars, row->size + 2); //2 to make room for null byte, I don't get it since we don't use null pointers
+    row->chars = realloc(row->chars, row->size + sizeof(c)); //2 to make room for null byte
     memmove(&row->chars[at+1], &row->chars[at], row->size - at +1); //like memcpy but works better if arrays could overlap
     row->size++; //because we only increase it by one, so updateRow doesn't see it and will add it, while also making sure chars also has it.
     row->chars[at] = c;
@@ -571,6 +563,7 @@ void editorDelChar() {
         editorRowAppendString(&E.row[E.cy-1],row->chars,row->size);
         editorDelRow(E.cy);
         E.cy--; 
+        E.rowoff--;
     }
 }
 
@@ -765,15 +758,17 @@ void editorScroll() { //we call this at start of refresh
 
     if (E.cy < E.rowoff) { //scrolling up
         E.rowoff = E.cy;
+        E.ry = 0;
     }
     if (E.cy >= E.rowoff + E.screenrows) { //scrolling down
         E.rowoff = E.cy - E.screenrows + 1;
+        E.ry = E.screenrows - 1;
     }
-    if (E.rx < E.coloff) { //scrol left
+    if (E.rx < E.coloff) { //scroll left
         E.coloff = E.rx;
     }
-    if (E.rx >= E.coloff + E.screencols)  { //scroll right
-        E.coloff = E.rx - E.screencols + 1;
+    if (E.rx >= E.coloff + E.screencols - NUM_PADDING)  { //scroll right
+        E.coloff = E.rx - E.screencols + 1 + NUM_PADDING;
     }
 }
 
@@ -781,7 +776,7 @@ void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screenrows; y++) { //currently 24 since number of rows is unknown
         int filerow = y + E.rowoff;
-        if (filerow >= E.numrows) { //any line we are drawing that is over the text file length will have a ~ at the start
+        if (filerow >= E.numrows) { //any line we are drawing that is over the text file length will have a ~ at the start, or if we are on startup
             
             if (E.numrows == 0 && y == E.screenrows / 3) { //writing welcome message branch
                 char welcome[80];
@@ -800,9 +795,16 @@ void editorDrawRows(struct abuf *ab) {
             }
         
         }   else {
+
+            char nbuf[10];
+            int row = y-E.ry;
+            if (row<0) row *= -1;
+            int nlen = snprintf(nbuf,sizeof(nbuf)," %s%d  ", row < 10 ? "0" : "", row);
+            abAppend(ab,nbuf,nlen);
+
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0; //since len can be negative if we have scroll to the right enough
-            if (len > E.screencols) len = E.screencols; //truncate  the text
+            if (len > E.screencols - NUM_PADDING + 1) len = E.screencols - NUM_PADDING + 1; //truncate  the text
             
             char *c = &E.row[filerow].render[E.coloff]; //the rendered text of filerow-th row into ab
             //the E.coloff index for chars will make the text start from the coloff-th column.
@@ -841,7 +843,7 @@ void editorDrawRows(struct abuf *ab) {
             abAppend(ab, "\x1b[39m", 5); //reset colour
         }
 
-        abAppend(ab, "\x1b[K",3);//clear each line as we draw it, meaning that it clears it from the screen
+        abAppend(ab, "\x1b[K",3);//clear each line as we draw it
         abAppend(ab,"\r\n",2);
     }
 }
@@ -850,11 +852,11 @@ void editorDrawStatusBar(struct abuf *ab)   {
     abAppend(ab , "\x1b[7m", 4); //this command invert the colors for the text after
     char status[80], rstatus[80];
     int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[No Name]", E.numrows, E.dirty ? "(modified)" : "");
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d", E.syntax ? E.syntax->filetype : "no ft", E.cy+1, E.numrows); //indicator of percentage 
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%s │ %d/%d", E.syntax ? E.syntax->filetype : "no ft", E.cy+1, E.numrows); //indicator of percentage 
     if (len > E.screencols) len = E.screencols;
     abAppend(ab, status, len);
     while (len < E.screencols)  {
-        if (E.screencols - len == rlen){ //when we only have space for the the rstatus string, we string it.
+        if (E.screencols - len == rlen ){ //when we only have space for the the rstatus string, we string it.
             abAppend(ab, rstatus, rlen);
             break;
         }   else {
@@ -890,7 +892,7 @@ void editorRefreshScreen() { //refresh occurs after all processing of inputs has
     editorDrawMessageBar(&ab);
 
     char buf[32];
-    snprintf(buf,sizeof(buf),"\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx-E.coloff) + 1); //adds the position of the cursor that we want, to a buf, which we can then add to the end of ab to set the mouse position.
+    snprintf(buf,sizeof(buf),"\x1b[%d;%dH", E.ry + 1, (E.rx - E.coloff) + NUM_PADDING); //adds the position of the cursor that we want, to a buf, which we can then add to the end of ab to set the mouse position.
     abAppend(&ab, buf, strlen(buf)); //we add the buffer then to the string to move the cursor during refresh
     //snprintf prints a string in a given format to a specified length
 
@@ -962,24 +964,30 @@ void editorMoveCursor(int key) { //int because we have associated each keypress 
                 E.cx--;
             else if (E.cy > 0) {
                 E.cy--; //reduce the row count by one
+                E.ry--;
                 E.cx = E.row[E.cy].size; //sets length to length of previous line
             }
             break;
         case ARROW_RIGHT:
             if (row && E.cx < row->size)
                 E.cx++;
-            else if (row && E.cx == row ->size) {
+            else if (row && E.cx == row->size) {
                 E.cy++; //move to next row
+                E.ry++;
                 E.cx = 0; //and start of 
             }
             break;
         case ARROW_UP:
-            if (E.cy != 0)
+            if (E.cy != 0) {
                 E.cy--;
+                E.ry--;
+            }
             break;
         case ARROW_DOWN:
             if (E.cy < E.numrows)
                 E.cy++;
+            if (E.ry < E.screenrows - 1)
+                E.ry++;
             break;
     }
 
@@ -1075,6 +1083,7 @@ void initEditor() {
     E.cx = 0;
     E.cy = 0;
     E.rx = 0;
+    E.ry = 0;
     E.rowoff = 0;
     E.coloff = 0;
     E.numrows = 0;
