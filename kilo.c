@@ -101,8 +101,15 @@ char *C_HL_keywords[] = {
   "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|", "void|", NULL
 }; //| to denote secondary keywords
 
+char *PY_HL_extensions[] = {".py",NULL};
+char *PY_HL_keywords[] = {
+    "if", "while", "for", "match", "case", "from", "import", "as", "return", "else", "elif", "try", "except", "raise", "in"
+    "not|", "lambda|", "self|", "in|", "and|", "def|", "class|", "or|", "is|", "True|", "False|", 
+};
+
 struct editorSyntax HLDB[] = { //Array of editorSyntax structs
     { "c", C_HL_extensions, C_HL_keywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS }, //struct for .c
+    { "py", PY_HL_extensions, PY_HL_keywords, "#", "\"""", "\"""", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
@@ -768,7 +775,7 @@ void editorScroll() { //we call this at start of refresh
         E.coloff = E.rx;
     }
     if (E.rx >= E.coloff + E.screencols - NUM_PADDING)  { //scroll right
-        E.coloff = E.rx - E.screencols + 1 + NUM_PADDING;
+        E.coloff = E.rx - E.screencols + 1 + NUM_PADDING; //add padding so we don't go back to it.
     }
 }
 
