@@ -7,3 +7,8 @@ This is currently similar to what is found on the guide, but I hope to developme
 ## Extensions Implemented:
 - vim-like row numbering
 - Python highlighting
+- Vim-like modes, with ability to write commands
+
+## (Currently) Supported commands
+- w
+- q (and q!)
