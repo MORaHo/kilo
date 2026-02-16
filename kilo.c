@@ -52,6 +52,12 @@ enum editorHighlight { //syntax highlighting colour enum
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
 #define HL_HIGHLIGHT_STRINGS (1<<1)
 
+#define COMMAND_MODE (1<<0)
+#define EDIT_MODE (1<<1)
+
+#define COMMAND_BOOL 0
+#define SEARCH_BOOL 1
+
 /*** data ***/
 
 struct editorSyntax {
@@ -86,6 +92,7 @@ struct editorConfig {
     int dirty; //value which we will be treating as a boolean, but could be use to see how much has been modified.
     char *filename;
     char statusmsg[80];
+    char mode;
     time_t statusmsg_time; //time the message was written so we can then delete it.
     struct editorSyntax *syntax;
     struct termios orig_termios;
@@ -118,7 +125,7 @@ struct editorSyntax HLDB[] = { //Array of editorSyntax structs
 
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
-char *editorPrompt(char *prompt, void (*callback)(char *, int)); //callback is a generic function that passes the required inputs after, in this case we are asking a pointer to said function.
+char *editorPrompt(char *prompt, char mode_bool, void (*callback)(char *, int)); //callback is a generic function that passes the required inputs after, in this case we are asking a pointer to said function.
 
 /*** terminal ***/
 
@@ -500,15 +507,19 @@ void editorDelRow(int at)   {
     editorFreeRow(&E.row[at]); //free memory
     memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at -1)); //move all rows up one
     for (int j = at; j < E.numrows - 1; j++) E.row[j].idx--; //update all rows after once this is deleted.
-    E.numrows--;
     E.dirty++;
+    if (at == E.numrows-1) {
+        E.rowoff--;
+        E.ry++;
+    }
+    E.numrows--;
 }
 
 void editorRowInsertChar(erow *row, int at, int c)  {
 
     if (at < 0 || at > row->size) at = row->size; //can't insert without the limits of the string + 1
 
-    row->chars = realloc(row->chars, row->size + sizeof(c)); //2 to make room for null byte
+    row->chars = realloc(row->chars, row->size + 2); //2 to make room for null byte
     memmove(&row->chars[at+1], &row->chars[at], row->size - at +1); //like memcpy but works better if arrays could overlap
     row->size++; //because we only increase it by one, so updateRow doesn't see it and will add it, while also making sure chars also has it.
     row->chars[at] = c;
@@ -554,6 +565,7 @@ void editorInsertNewLine()  {
         editorUpdateRow(row); //update row to definitively truncate row
     }
     E.cy++;
+    E.ry++;
     E.cx = 0;
 }
 
@@ -570,7 +582,7 @@ void editorDelChar() {
         editorRowAppendString(&E.row[E.cy-1],row->chars,row->size);
         editorDelRow(E.cy);
         E.cy--; 
-        E.rowoff--;
+        E.ry--;
     }
 }
 
@@ -624,7 +636,7 @@ void editorOpen(char *filename) { //This function initialized all the rows at th
 
 void editorSave()   {
     if (E.filename == NULL) {
-        E.filename = editorPrompt("Save as: %s",NULL);
+        E.filename = editorPrompt("Save as: %s",0,NULL);
         if (E.filename == NULL) {
             editorSetStatusMessage("Save aborted");
             return;
@@ -649,6 +661,7 @@ void editorSave()   {
         }
         close(fd); //we close the file whether or not an error has occured.
     }
+    E.dirty = 0;
     free(buf);
     editorSetStatusMessage("can't save! I/O error: %s", strerror(errno));
 }
@@ -715,7 +728,7 @@ void editorFind()   {
     int saved_coloff = E.coloff;
     int saved_rowoff = E.rowoff;
 
-    char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback); //editorPrompt will call editorFindCallback every time the search string changes, so search can alwawys change.
+    char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)",SEARCH_BOOL, editorFindCallback); //editorPrompt will call editorFindCallback every time the search string changes, so search can alwawys change.
 
     if (query)  {
         free(query);
@@ -725,6 +738,40 @@ void editorFind()   {
         E.coloff = saved_coloff;
         E.rowoff = saved_rowoff;
     }
+}
+
+/*** command ***/
+
+void editorCommandCallback(char *command, int key) {
+
+    if (key == '\x1b') return;
+    else  if (key == '\r') {
+        char *space = strstr(command," ");
+        size_t command_len = space - command;
+        char *command_list = malloc(command_len);
+        command_list = command;
+
+        if (strstr(command_list,"w"))
+            editorSave();
+        if (strstr(command_list,"q")) {
+            if (E.dirty == 0)   { //if the file has not been modified
+                write(STDOUT_FILENO, "\x1b[2J", 4); // clears (whole visible) screen after each keypress (since we call it after each keypress). We remove this to optimize by clearing each line as we draw it.
+                write(STDOUT_FILENO, "\x1b[H", 3);
+                exit(0);
+            } else if (E.dirty != 0 && (command[command_len-1] == '!')) {
+                write(STDOUT_FILENO, "\x1b[2J", 4); // clears (whole visible) screen after each keypress (since we call it after each keypress). We remove this to optimize by clearing each line as we draw it.
+                write(STDOUT_FILENO, "\x1b[H", 3);
+                exit(0);
+            }   else
+                editorSetStatusMessage("File has been modified, to force closure include ! at the END of the command.");
+        }
+        return;
+    }
+}
+
+void editorCommand() {
+    char *command = editorPrompt(":%s",COMMAND_BOOL,editorCommandCallback);
+    free(command);
 }
 
 /*** append buffer ***/
@@ -922,7 +969,7 @@ void editorSetStatusMessage( const char *fmt, ...) { //The ... indicates a varia
 
 /*** input ***/
 
-char *editorPrompt(char *prompt, void (*callback)(char *, int))    { //callback is a is a variable which in this case will be a function that passes (char*, int), and in this case is also a pointer, and outputs void.
+char *editorPrompt(char *prompt, char mode_bool, void (*callback)(char *, int))    { //callback is a is a variable which in this case will be a function that passes (char*, int), and in this case is also a pointer, and outputs void.
 
     size_t bufsize = 128;
     char *buf = malloc(bufsize);
@@ -941,7 +988,7 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int))    { //callback 
             editorSetStatusMessage("");
             if (callback) callback(buf,c); //callback can either be a function, or if we are not interested, it can also be a NULL, which will mean this branch doesn't pass. We call this to end the search.
             free(buf);
-            return NULL; //Causes error message to be printed in status bar
+            return NULL;
         } else if (c == '\r') {
             if (buflen != 0)    {
                 editorSetStatusMessage("");
@@ -953,11 +1000,11 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int))    { //callback 
                 bufsize *= 2;
                 buf = realloc(buf, bufsize);
             }
-            buf[buflen++] = c; //add text to end of prompt 
+            buf[buflen++] = c; //add text to end of prompt, also increases buflen so last character can be a null character
             buf[buflen] = '\0';
         }
 
-        if (callback) callback(buf, c); //search
+        if (mode_bool && callback) callback(buf, c); //search
     }
 
 }
@@ -991,10 +1038,11 @@ void editorMoveCursor(int key) { //int because we have associated each keypress 
             }
             break;
         case ARROW_DOWN:
-            if (E.cy < E.numrows)
+            if (E.cy < E.numrows) {
                 E.cy++;
-            if (E.ry < E.screenrows - 1)
-                E.ry++;
+                if (E.ry < E.screenrows - 1)
+                    E.ry++;
+            }
             break;
     }
 
@@ -1004,6 +1052,8 @@ void editorMoveCursor(int key) { //int because we have associated each keypress 
         E.cx = rowlen;
     }
 }
+
+/** edit mode **/
 
 void editorProcessKeypress() { // function for mapping keypress to given actions.
     static int quit_times = KILO_QUIT_TIMES;
@@ -1073,6 +1123,7 @@ void editorProcessKeypress() { // function for mapping keypress to given actions
 
         case CTRL_KEY('l'):
         case '\x1b':
+            E.mode = COMMAND_MODE;
             break;
 
         default:
@@ -1081,6 +1132,51 @@ void editorProcessKeypress() { // function for mapping keypress to given actions
     }
 
     quit_times = KILO_QUIT_TIMES;
+}
+
+/** normal mode **/
+
+void commandProcessKeypress() {
+    
+    int c = editorReadKey();
+
+    switch (c) {
+
+        case CTRL_KEY('q'):
+            write(STDOUT_FILENO, "\x1b[2J", 4); // clears (whole visible) screen after each keypress (since we call it after each keypress). We remove this to optimize by clearing each line as we draw it.
+            write(STDOUT_FILENO, "\x1b[H", 3);
+            exit(0);
+            break;
+
+        case ARROW_DOWN:
+        case 'j':
+            editorMoveCursor(ARROW_DOWN);
+            break;
+        case ARROW_LEFT:
+        case 'h':
+            editorMoveCursor(ARROW_LEFT);
+            break;
+        case ARROW_RIGHT:
+        case 'l':
+            editorMoveCursor(ARROW_RIGHT);
+            break;
+        case ARROW_UP:
+        case 'k':
+            editorMoveCursor(ARROW_UP);
+            break;
+            
+        case 'i':
+            E.mode = EDIT_MODE;
+            break;
+
+        case ':':
+            editorCommand();
+            break;
+        
+        default:
+            break;
+    }
+
 }
 
 /*** init ***/
@@ -1099,6 +1195,7 @@ void initEditor() {
     E.filename = NULL;
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
+    E.mode = COMMAND_MODE;
     E.syntax = NULL; //since filetype unknown, we don't highlight
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
@@ -1108,14 +1205,14 @@ void initEditor() {
 int main(int argc, char *argv[]) {
     
     enableRawMode(); //draw tilde at rows
-    initEditor(); //check if
+    initEditor();
     if (argc >= 2) editorOpen(argv[1]);
 
     editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find"); //initial status-message
 
     while (1) {
         editorRefreshScreen();
-        editorProcessKeypress(); //stops here until a key is pressed
+        E.mode == COMMAND_MODE ? commandProcessKeypress() : editorProcessKeypress(); //stops here until a key is pressed
     }
     return 0;
 }
