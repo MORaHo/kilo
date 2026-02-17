@@ -1,4 +1,4 @@
-# Kilo
+# Pico
 
 Implementation of the Kilo text editor written by Salvatore Sanfilippo (antirez), following a guide written by Paige Ruten(snaptoken), at https://viewsourcecode.org/snaptoken/kilo/index.html .
 
